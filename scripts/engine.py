@@ -246,6 +246,16 @@ class EveNetEngine(L.LightningModule):
         ###### Last ######
         # self.save_hyperparameters()
 
+    def assignment_metric_inputs(self, inputs):
+        """Append physical jet mass for diagnostics only; model inputs stay unchanged."""
+        cloud = inputs["x"]
+        if not self.config.options.Training.get("assignment_metrics_jet_mass", False):
+            return cloud
+        mass = inputs["diagnostic_jet_mass"]
+        if mass.shape != cloud.shape[:2]:
+            raise ValueError("diagnostic_jet_mass must match the point-cloud event/jet axes")
+        return torch.cat((cloud, mass.to(cloud).unsqueeze(-1)), dim=-1)
+
     def forward(self, x):
         return self.model(x)
 
@@ -329,7 +339,7 @@ class EveNetEngine(L.LightningModule):
                 batch_size=batch_size,
                 device=device,
                 metrics=self.assignment_metrics_train if self.training else self.assignment_metrics_valid,
-                point_cloud=inputs['x'],
+                point_cloud=self.assignment_metric_inputs(inputs) if update_metric else inputs['x'],
                 point_cloud_mask=inputs['x_mask'],
                 subprocess_id=inputs["subprocess_id"],
                 update_metric=update_metric,
@@ -372,7 +382,7 @@ class EveNetEngine(L.LightningModule):
                 loss_raw["generation-recon"] = loss_head_dict["generation-recon"]
 
         if self.segmentation_cfg.include and outputs["segmentation-cls"] is not None:
-            seg_targets_cls = batch[self.target_segmentation_cls_key].to(device=device)
+            seg_targets_cls = batch[self.target_segmentation_cls_key].to(device=device, dtype=torch.float32)
             seg_target_mask = batch[self.target_segmentation_data_mask_key].to(device=device)
             class_weight = self.segmentation_cls_balance.to(device=device)
             scaled_seg_loss = seg_step(
@@ -630,7 +640,7 @@ class EveNetEngine(L.LightningModule):
         # #     print(f"[Task {task}] Loss: {loss.item()}")
         # #     print_params_used_by_loss(loss, self.model)
         #
-        if self.current_step % self.log_gradient_step == 0 and self.global_rank == 0:
+        if self.log_gradient_step > 0 and self.current_step % self.log_gradient_step == 0 and self.global_rank == 0:
             self.log_task_gradient(task_losses, shared_params)
 
         # # === Backward for EveNet Main Part (multitask) ===
@@ -660,7 +670,7 @@ class EveNetEngine(L.LightningModule):
 
         # === Check for Gradients ===
         clip_grad_norm_(self.model.parameters(), 1.0)
-        if self.current_step % self.log_gradient_step == 0:
+        if self.log_gradient_step > 0 and self.current_step % self.log_gradient_step == 0:
             self.check_gradient(gradient_heads)
 
         # === Step optimizers ===
@@ -816,6 +826,10 @@ class EveNetEngine(L.LightningModule):
                 outputs["neutrinos"]["predict"][feature_names[i]] = generated_distribution[..., i]
                 outputs["neutrinos"]["target"][feature_names[i]] = inputs['x_invisible'][..., i]
 
+        if self.config.options.prediction.get("segmentation_class_only", False):
+            keep = {"segmentation-cls", *extra_save}
+            outputs = {key: value for key, value in outputs.items() if key in keep}
+
         return outputs
 
     def check_gradient(self, gradient_heads: dict[str, torch.nn.Module]):
@@ -952,7 +966,10 @@ class EveNetEngine(L.LightningModule):
                         event_particles=self.config.event_info.event_particles[process],
                         product_symbolic_groups=self.config.event_info.product_symbolic_groups[process],
                         ptetaphienergy_index=self.config.event_info.ptetaphienergy_index,
-                        process=process
+                        process=process,
+                        feature_names=list(self.config.event_info.sequential_feature_names) + (
+                            ["mass"] if self.config.options.Training.get("assignment_metrics_jet_mass", False) else []
+                        ),
                     ) for process in self.config.event_info.process_names
                 }
 

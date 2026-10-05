@@ -150,6 +150,21 @@ def main(args: argparse.Namespace) -> None:
         base_dir, process_fn, platform_info, predict=True
     )
 
+    # Ray's default RunConfig storage (~/ray_results) is often on read-only AFS here;
+    # write under the prediction output's database folder instead. Override with
+    # EVENET_RAY_RESULTS.
+    ray_storage = os.environ.get("EVENET_RAY_RESULTS")
+    if not ray_storage:
+        pred_cfg = global_config.options.get("prediction", None)
+        if pred_cfg and pred_cfg.get("output_dir"):
+            out_dir = os.path.abspath(os.path.expanduser(str(pred_cfg["output_dir"])))
+            ray_storage = os.path.join(os.path.dirname(out_dir), "ray_results")
+        else:
+            ray_storage = os.path.join(os.getcwd(), "ray_results")
+    ray_storage = os.path.abspath(os.path.expanduser(ray_storage))
+    os.makedirs(ray_storage, exist_ok=True)
+    print(f"[predict] Ray storage_path: {ray_storage}")
+
     trainer = TorchTrainer(
         train_loop_per_worker=predict_func,
         train_loop_config={
@@ -164,7 +179,7 @@ def main(args: argparse.Namespace) -> None:
             resources_per_worker=platform_info.resources_per_worker,
             use_gpu=platform_info.get("use_gpu", True),
         ),
-        run_config=RunConfig(name="EveNet-Predict"),
+        run_config=RunConfig(name="EveNet-Predict", storage_path=ray_storage),
         datasets={"predict": predict_ds},
         dataset_config=PredictDataControl()
     )

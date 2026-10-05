@@ -251,8 +251,15 @@ def process_dict(
 
         # ==> CLASSIFICATION
         if len(unique_process_ids) > 0:
-            class_counts = np.bincount(pdict['classification'], weights=weights)
-            unweighted_class_counts = np.bincount(pdict['classification'])
+            # minlength: Data-only inference files only contain class 0; without
+            # it bincount is length 1 and indexing class 1 (SM_HHH) IndexErrors.
+            n_cls = len(unique_process_ids)
+            class_counts = np.bincount(
+                pdict['classification'], weights=weights, minlength=n_cls
+            )
+            unweighted_class_counts = np.bincount(
+                pdict['classification'], minlength=n_cls
+            )
 
             lines = [
                 "===============================================",
